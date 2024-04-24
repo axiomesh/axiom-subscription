@@ -58,8 +58,8 @@ func (dao *SubscriptionDao) createTableIfNotExists() error {
 	return nil
 }
 
-func (dao *SubscriptionDao) QueryByChainIdAndTag(ctx context.Context, chainId int, tag string) ([]*model.Subscription, error) {
-	subscriptions, err := model.Subscriptions(qm.Where("chain_id = ? AND tag = ?", chainId, tag)).All(ctx, dao.db)
+func (dao *SubscriptionDao) QueryByChainIdAndTag(ctx context.Context, chainId int, tag string) (*model.Subscription, error) {
+	subscriptions, err := model.Subscriptions(qm.Where("chain_id = ? AND tag = ?", chainId, tag)).One(ctx, dao.db)
 	if err != nil {
 		return nil, err
 	}
@@ -82,10 +82,7 @@ func (dao *SubscriptionDao) UpdateHeight(ctx context.Context, sub *model.Subscri
 	return nil
 }
 
-func (dao *SubscriptionDao) DeleteSubscription(ctx context.Context, sub *model.Subscription) error {
-	_, err := sub.Delete(ctx, dao.db)
-	if err != nil {
-		return err
-	}
-	return nil
+func (dao *SubscriptionDao) DeleteSubscription(ctx context.Context, tag string, chainId int) error {
+	_, err := model.Subscriptions(qm.Where("tag = ? AND chain_id = ?", tag, chainId)).DeleteAll(ctx, dao.db)
+	return err
 }
