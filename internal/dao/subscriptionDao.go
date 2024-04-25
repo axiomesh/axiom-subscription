@@ -75,7 +75,8 @@ func (dao *SubscriptionDao) InsertSubscription(ctx context.Context, sub *model.S
 }
 
 func (dao *SubscriptionDao) UpdateHeight(ctx context.Context, sub *model.Subscription) error {
-	_, err := sub.Update(ctx, dao.db, boil.Whitelist(model.SubscriptionColumns.Height))
+	_, err := model.Subscriptions(qm.Where("tag = ? AND chain_id = ?", sub.Tag, sub.ChainID)).UpdateAll(ctx, dao.db, model.M{
+		"height": sub.Height})
 	if err != nil {
 		return err
 	}

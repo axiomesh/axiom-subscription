@@ -87,7 +87,7 @@ func (c *SubClient) ListenAndHandle(headers chan *types.Header, sub ethereum.Sub
 			}
 		case header := <-headers:
 			for _, sub := range c.Subscriptions {
-				startNum := sub.Height.Add(sub.Height, big.NewInt(1))
+				startNum := new(big.Int).Add(sub.Height, big.NewInt(1))
 				if startNum.Cmp(header.Number) <= 0 {
 					logs, err := c.rpcClient.FilterLogs(c.ctx, ethereum.FilterQuery{
 						FromBlock: startNum,
