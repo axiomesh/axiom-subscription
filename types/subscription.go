@@ -9,17 +9,18 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-type handlerFunc func(*BlockRangeLogs) error
+type handlerFunc func(*SubClientCtx, *BlockRangeLogs) error
 
 type Subscription struct {
-	Id        int
-	Tag       string
-	ChainId   int
-	Addresses []common.Address
-	Topics    [][]common.Hash
-	Start     *big.Int
-	Height    *big.Int
-	Handler   handlerFunc
+	Id          int
+	Tag         string
+	ChainId     int
+	Addresses   []common.Address
+	Topics      [][]common.Hash
+	Start       *big.Int
+	Height      *big.Int
+	IsPersisted bool
+	Handler     handlerFunc
 }
 
 func FromSubscriptionModel(subscription *model.Subscription) (*Subscription, error) {

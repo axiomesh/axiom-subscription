@@ -58,8 +58,8 @@ func (dao *SubscriptionDao) createTableIfNotExists() error {
 	return nil
 }
 
-func (dao *SubscriptionDao) QueryByChainIdAndTag(ctx context.Context, chainId int, tag string) ([]*model.Subscription, error) {
-	subscriptions, err := model.Subscriptions(qm.Where("chain_id = ? AND tag = ?", chainId, tag)).All(ctx, dao.db)
+func (dao *SubscriptionDao) QueryByChainIdAndTag(ctx context.Context, chainId int, tag string) (*model.Subscription, error) {
+	subscriptions, err := model.Subscriptions(qm.Where("chain_id = ? AND tag = ?", chainId, tag)).One(ctx, dao.db)
 	if err != nil {
 		return nil, err
 	}
@@ -75,17 +75,15 @@ func (dao *SubscriptionDao) InsertSubscription(ctx context.Context, sub *model.S
 }
 
 func (dao *SubscriptionDao) UpdateHeight(ctx context.Context, sub *model.Subscription) error {
-	_, err := sub.Update(ctx, dao.db, boil.Whitelist(model.SubscriptionColumns.Height))
+	_, err := model.Subscriptions(qm.Where("tag = ? AND chain_id = ?", sub.Tag, sub.ChainID)).UpdateAll(ctx, dao.db, model.M{
+		"height": sub.Height})
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (dao *SubscriptionDao) DeleteSubscription(ctx context.Context, sub *model.Subscription) error {
-	_, err := sub.Delete(ctx, dao.db)
-	if err != nil {
-		return err
-	}
-	return nil
+func (dao *SubscriptionDao) DeleteSubscription(ctx context.Context, tag string, chainId int) error {
+	_, err := model.Subscriptions(qm.Where("tag = ? AND chain_id = ?", tag, chainId)).DeleteAll(ctx, dao.db)
+	return err
 }

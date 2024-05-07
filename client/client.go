@@ -3,12 +3,11 @@ package client
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 
 	"github.com/axiomesh/axiom-subscription/internal/dao"
-	"github.com/axiomesh/axiom-subscription/internal/model"
 	subTypes "github.com/axiomesh/axiom-subscription/types"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -17,27 +16,64 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-type ClientInterface interface {
-	GetAllSubscription() []int
-	RemoveSubsciption(subId int) error
-	AddSubsciption(tag string, addresses []common.Address, topics [][]common.Hash, handler func(brl *subTypes.BlockRangeLogs) (err error)) (int, error)
+type Client interface {
+	AddSubscription(tag string, addresses []common.Address, topics [][]common.Hash, isPersisted bool, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error
+	RemoveSubsciption(tag string) error
+	GetSubscriptionStartAndHeight(tag string) (*big.Int, *big.Int, error)
+	GetSubscriptionTags() []string
+	GetChainId() int64
 }
 
-type ClientImpl struct {
-	ChainId         int64
+type SubClient struct {
+	chainId         int64
 	rpcUrl          string
 	wsUrl           string
-	SubscriptionDao *dao.SubscriptionDao
+	subscriptionDao *dao.SubscriptionDao
 	rpcClient       *ethclient.Client
 	wsClinet        *ethclient.Client
-	Subscriptions   []*subTypes.Subscription
+	subscriptions   map[string]*subTypes.Subscription
+	persistSupport  bool
 
+	logger slog.Logger
 	ctx    context.Context
-	cancel context.CancelFunc
 }
 
-func NewClient(rpcUrl string, wsUrl string, db *sqlx.DB) (*ClientImpl, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewCacheClient(rpcUrl string, wsUrl string, logger slog.Logger) (*SubClient, error) {
+	ctx := context.Background()
+	rpcClient, err := ethclient.Dial(rpcUrl)
+	if err != nil {
+		return nil, err
+	}
+	wsClinet, err := ethclient.Dial(wsUrl)
+	if err != nil {
+		return nil, err
+	}
+	chainId, err := rpcClient.ChainID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client := SubClient{
+		subscriptions:  make(map[string]*subTypes.Subscription),
+		chainId:        chainId.Int64(),
+		rpcClient:      rpcClient,
+		wsClinet:       wsClinet,
+		rpcUrl:         rpcUrl,
+		wsUrl:          wsUrl,
+		persistSupport: false,
+		logger:         logger,
+		ctx:            ctx,
+	}
+	headers := make(chan *types.Header)
+	sub, err := client.wsClinet.SubscribeNewHead(ctx, headers)
+	if err != nil {
+		return nil, err
+	}
+	go client.ListenAndHandle(headers, sub)
+	return &client, nil
+}
+
+func NewClient(rpcUrl string, wsUrl string, db *sqlx.DB, logger slog.Logger) (*SubClient, error) {
+	ctx := context.Background()
 	rpcClient, err := ethclient.Dial(rpcUrl)
 	if err != nil {
 		return nil, err
@@ -54,17 +90,17 @@ func NewClient(rpcUrl string, wsUrl string, db *sqlx.DB) (*ClientImpl, error) {
 	if err != nil {
 		return nil, err
 	}
-	var subscriptions []*subTypes.Subscription
-	client := ClientImpl{
-		Subscriptions:   subscriptions,
-		ChainId:         chainId.Int64(),
-		SubscriptionDao: sd,
+	client := SubClient{
+		subscriptions:   make(map[string]*subTypes.Subscription),
+		chainId:         chainId.Int64(),
+		subscriptionDao: sd,
 		rpcClient:       rpcClient,
 		wsClinet:        wsClinet,
 		rpcUrl:          rpcUrl,
 		wsUrl:           wsUrl,
+		persistSupport:  true,
+		logger:          logger,
 		ctx:             ctx,
-		cancel:          cancel,
 	}
 	headers := make(chan *types.Header)
 	sub, err := client.wsClinet.SubscribeNewHead(ctx, headers)
@@ -75,23 +111,21 @@ func NewClient(rpcUrl string, wsUrl string, db *sqlx.DB) (*ClientImpl, error) {
 	return &client, nil
 }
 
-func (c *ClientImpl) ListenAndHandle(headers chan *types.Header, sub ethereum.Subscription) {
+func (c *SubClient) ListenAndHandle(headers chan *types.Header, sub ethereum.Subscription) {
 	for {
 		select {
 		case err := <-sub.Err():
 			if err != nil {
-				fmt.Println(err)
 				sub, err = c.reconnect(headers, sub)
 				if err != nil || sub == nil {
-					fmt.Println(err)
+					c.logger.Error(err.Error())
 				} else {
 					break
 				}
 			}
 		case header := <-headers:
-			fmt.Println(header.Number)
-			for _, sub := range c.Subscriptions {
-				startNum := sub.Height.Add(sub.Height, big.NewInt(1))
+			for _, sub := range c.subscriptions {
+				startNum := new(big.Int).Add(sub.Height, big.NewInt(1))
 				if startNum.Cmp(header.Number) <= 0 {
 					logs, err := c.rpcClient.FilterLogs(c.ctx, ethereum.FilterQuery{
 						FromBlock: startNum,
@@ -100,39 +134,50 @@ func (c *ClientImpl) ListenAndHandle(headers chan *types.Header, sub ethereum.Su
 						Topics:    sub.Topics,
 					})
 					if err != nil {
-						fmt.Print(err)
+						c.logger.Error(err.Error())
 					}
 					if len(logs) == 0 {
+						if c.persistSupport && sub.IsPersisted {
+							subModel, err := subTypes.ToSubscriptionModel(sub)
+							if err != nil {
+								c.logger.Error(err.Error())
+								continue
+							}
+							subModel.Height = header.Number.String()
+							err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
+							if err != nil {
+								c.logger.Error(err.Error())
+								continue
+							}
+						}
 						sub.Height = header.Number
-						subModel, err := subTypes.ToSubscriptionModel(sub)
-						if err != nil {
-							continue
-						}
-						err = c.SubscriptionDao.UpdateHeight(c.ctx, subModel)
-						if err != nil {
-							continue
-						}
 					} else {
 						blockRangeSub := &subTypes.BlockRangeLogs{
-							ChainID: sub.ChainId,
+							ChainId: sub.ChainId,
 							Logs:    logs,
 							Start:   startNum,
 							End:     header.Number,
 						}
-						err = sub.Handler(blockRangeSub)
+						err = sub.Handler(subTypes.NewSubClientCtx(c.ctx), blockRangeSub)
 						if err != nil {
-							fmt.Println(err)
+							c.logger.Error(err.Error())
 							continue
+						}
+						if c.persistSupport && sub.IsPersisted {
+							subModel, err := subTypes.ToSubscriptionModel(sub)
+							if err != nil {
+								c.logger.Error(err.Error())
+								continue
+							}
+							subModel.Height = header.Number.String()
+							err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
+							if err != nil {
+								c.logger.Error(err.Error())
+								continue
+							}
 						}
 						sub.Height = header.Number
-						subModel, err := subTypes.ToSubscriptionModel(sub)
-						if err != nil {
-							continue
-						}
-						err = c.SubscriptionDao.UpdateHeight(c.ctx, subModel)
-						if err != nil {
-							continue
-						}
+
 					}
 
 				}
@@ -142,7 +187,7 @@ func (c *ClientImpl) ListenAndHandle(headers chan *types.Header, sub ethereum.Su
 	}
 }
 
-func (c *ClientImpl) reconnect(headers chan *types.Header, sub ethereum.Subscription) (ethereum.Subscription, error) {
+func (c *SubClient) reconnect(headers chan *types.Header, sub ethereum.Subscription) (ethereum.Subscription, error) {
 	heartbeatInterval := 15 * time.Second
 	heartbeatTimer := time.NewTicker(heartbeatInterval)
 	for range heartbeatTimer.C {
@@ -154,7 +199,6 @@ func (c *ClientImpl) reconnect(headers chan *types.Header, sub ethereum.Subscrip
 		}
 	}
 	sub.Unsubscribe()
-	// Attempt to reconnect
 	newSub, err := c.wsClinet.SubscribeNewHead(c.ctx, headers)
 	if err != nil {
 		return nil, err
@@ -162,80 +206,136 @@ func (c *ClientImpl) reconnect(headers chan *types.Header, sub ethereum.Subscrip
 	return newSub, nil
 }
 
-func (c *ClientImpl) AddSubsciption(tag string, addresses []common.Address, topics [][]common.Hash, handler func(brl *subTypes.BlockRangeLogs) (err error)) (int, error) {
-	currentHeigeht, err := c.rpcClient.BlockNumber(c.ctx)
-	if err != nil {
-		return 0, err
+func (c *SubClient) AddSubscription(tag string, addresses []common.Address, topics [][]common.Hash, isPersisted bool, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error {
+	if !c.persistSupport && isPersisted {
+		return errors.New("client not support persist")
 	}
-	subs, err := c.SubscriptionDao.QueryByChainIdAndTag(c.ctx, int(c.ChainId), tag)
-	if err != nil {
-		return 0, err
+	if _, ok := c.subscriptions[tag]; ok {
+		return nil
 	}
-	if len(subs) > 1 {
-		return 0, errors.New("more than one subscription with same tag")
-	}
-	if len(subs) != 0 {
-		for _, sub := range c.Subscriptions {
-			if subs[0].Tag == sub.Tag {
-				return sub.Id, nil
-			}
-		}
-		subsubTypes, err := subTypes.FromSubscriptionModel(subs[0])
+
+	if !isPersisted {
+		currentHeigeht, err := c.rpcClient.BlockNumber(c.ctx)
 		if err != nil {
-			return subsubTypes.Id, err
+			return err
 		}
-		subsubTypes.Handler = handler
-		c.Subscriptions = append(c.Subscriptions, subsubTypes)
-		return subsubTypes.Id, nil
-	} else {
 		sub := &subTypes.Subscription{
-			ChainId:   int(c.ChainId),
-			Tag:       tag,
-			Start:     big.NewInt(int64(currentHeigeht)),
-			Height:    big.NewInt(int64(currentHeigeht)),
-			Addresses: addresses,
-			Topics:    topics,
-			Handler:   handler,
+			ChainId:     int(c.chainId),
+			Tag:         tag,
+			Start:       big.NewInt(int64(currentHeigeht)),
+			Height:      big.NewInt(int64(currentHeigeht)),
+			Addresses:   addresses,
+			Topics:      topics,
+			IsPersisted: isPersisted,
+			Handler:     handler,
+		}
+		c.subscriptions[tag] = sub
+		return nil
+	}
+
+	subTag, err := c.subscriptionDao.QueryByChainIdAndTag(c.ctx, int(c.chainId), tag)
+	if err == nil && subTag != nil && !isPersisted {
+		return errors.New("persisted subscription already exists")
+	}
+
+	if err == nil && subTag != nil {
+		subFromDb, err := subTypes.FromSubscriptionModel(subTag)
+		if err != nil {
+			return err
+		}
+		if !compareAddresses(subFromDb.Addresses, addresses) || !compareTopics(subFromDb.Topics, topics) {
+			return errors.New("err Subscription Data")
+		}
+		subFromDb.Handler = handler
+		subFromDb.IsPersisted = isPersisted
+		c.subscriptions[tag] = subFromDb
+	} else {
+		currentHeigeht, err := c.rpcClient.BlockNumber(c.ctx)
+		if err != nil {
+			return err
+		}
+		sub := &subTypes.Subscription{
+			ChainId:     int(c.chainId),
+			Tag:         tag,
+			Start:       big.NewInt(int64(currentHeigeht)),
+			Height:      big.NewInt(int64(currentHeigeht)),
+			Addresses:   addresses,
+			Topics:      topics,
+			IsPersisted: isPersisted,
+			Handler:     handler,
 		}
 		subModel, err := subTypes.ToSubscriptionModel(sub)
 		if err != nil {
-			return subModel.ID, err
+			return err
 		}
-		subId, err := c.SubscriptionDao.InsertSubscription(c.ctx, subModel)
+		subId, err := c.subscriptionDao.InsertSubscription(c.ctx, subModel)
 		sub.Id = subId
-		c.Subscriptions = append(c.Subscriptions, sub)
-		return subId, nil
+		c.subscriptions[tag] = sub
 	}
-}
-
-func (c *ClientImpl) RemoveSubsciption(subId int) error {
-	err := c.SubscriptionDao.DeleteSubscription(c.ctx, &model.Subscription{ID: subId})
-	if err != nil {
-		return err
-	}
-	var newSubscriptions []*subTypes.Subscription
-	for _, sub := range c.Subscriptions {
-		if sub.Id != subId {
-			newSubscriptions = append(newSubscriptions, sub)
-		}
-	}
-	c.Subscriptions = newSubscriptions
 	return nil
 }
 
-func (c *ClientImpl) GetSubscriptionStartAndHeight(subId int) (*big.Int, *big.Int, error) {
-	for _, sub := range c.Subscriptions {
-		if sub.Id == subId {
+func (c *SubClient) RemoveSubsciption(tag string) error {
+	if c.persistSupport {
+		err := c.subscriptionDao.DeleteSubscription(c.ctx, tag, int(c.chainId))
+		if err != nil {
+			return err
+		}
+	}
+	c.subscriptions[tag] = nil
+	return nil
+}
+
+func (c *SubClient) GetSubscriptionStartAndHeight(tag string) (*big.Int, *big.Int, error) {
+	for _, sub := range c.subscriptions {
+		if sub.Tag == tag {
 			return sub.Start, sub.Height, nil
 		}
 	}
 	return nil, nil, errors.New("subscription not found")
 }
 
-func (c *ClientImpl) GetAllSubscription() []int {
-	var ids []int
-	for _, sub := range c.Subscriptions {
-		ids = append(ids, sub.Id)
+func (c *SubClient) GetSubscriptionTags() []string {
+	var tags []string
+	for _, sub := range c.subscriptions {
+		tags = append(tags, sub.Tag)
 	}
-	return ids
+	return tags
+}
+
+func (c *SubClient) GetChainId() int64 {
+	return c.chainId
+}
+
+func compareTopics(slice1, slice2 [][]common.Hash) bool {
+	if len(slice1) != len(slice2) {
+		return false
+	}
+
+	for i := range slice1 {
+		if len(slice1[i]) != len(slice2[i]) {
+			return false
+		}
+		for j := range slice1[i] {
+			if slice1[i][j] != slice2[i][j] {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func compareAddresses(slice1, slice2 []common.Address) bool {
+	if len(slice1) != len(slice2) {
+		return false
+	}
+
+	for i := range slice1 {
+		if slice1[i] != slice2[i] {
+			return false
+		}
+	}
+
+	return true
 }
