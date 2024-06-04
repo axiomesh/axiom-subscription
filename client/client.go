@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
@@ -21,6 +22,7 @@ type Client interface {
 	RemoveSubsciption(tag string) error
 	GetSubscriptionStartAndHeight(tag string) (*big.Int, *big.Int, error)
 	GetSubscriptionTags() []string
+	GetLogsHistory(addresses []common.Address, topics [][]common.Hash, start *big.Int, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error
 	GetChainId() int64
 }
 
@@ -301,6 +303,53 @@ func (c *SubClient) GetSubscriptionTags() []string {
 		tags = append(tags, sub.Tag)
 	}
 	return tags
+}
+
+func (c *SubClient) GetLogsHistory(addresses []common.Address, topics [][]common.Hash, start *big.Int, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error {
+	end, err := c.rpcClient.BlockNumber(c.ctx)
+	if err != nil {
+		return err
+	}
+	if start.Cmp(big.NewInt(int64(end))) == 1 {
+		return fmt.Errorf("start is greater than end")
+	}
+	go c.getLogsHis(addresses, topics, start, big.NewInt(int64(end)), handler)
+	return nil
+}
+
+func (c *SubClient) getLogsHis(addresses []common.Address, topics [][]common.Hash, start *big.Int, end *big.Int, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) {
+	heartbeatInterval := 5 * time.Second
+	heartbeatTimer := time.NewTicker(heartbeatInterval)
+	for start.Cmp(end) != 1 {
+		nextBlock := new(big.Int).Add(start, big.NewInt(1999))
+		if nextBlock.Cmp(end) == 1 {
+			nextBlock = end
+		}
+		var logs []types.Log
+		for range heartbeatTimer.C {
+			var err error
+			logs, err = c.rpcClient.FilterLogs(context.Background(), ethereum.FilterQuery{
+				FromBlock: start,
+				ToBlock:   nextBlock,
+				Addresses: addresses,
+				Topics:    topics,
+			})
+			if err == nil {
+				break
+			}
+		}
+		blockRangeSub := &subTypes.BlockRangeLogs{
+			ChainId: int(c.GetChainId()),
+			Logs:    logs,
+			Start:   start,
+			End:     nextBlock,
+		}
+		err := handler(subTypes.NewSubClientCtx(c.ctx), blockRangeSub)
+		if err != nil {
+			break
+		}
+		start = new(big.Int).Add(nextBlock, big.NewInt(1))
+	}
 }
 
 func (c *SubClient) GetChainId() int64 {
