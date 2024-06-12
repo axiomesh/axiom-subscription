@@ -49,7 +49,7 @@ func TestClient(t *testing.T) {
 	auth.GasLimit = uint64(300000)
 
 	// 设置交易的 gas 价格
-	auth.GasPrice = big.NewInt(10000000000)
+	auth.GasPrice = big.NewInt(1000000000000000)
 	abi, err := ParseABI(TestAbi)
 	assert.Nil(t, err)
 
@@ -71,7 +71,7 @@ func TestClient(t *testing.T) {
 
 	newNonce := nonce + 1
 
-	tx := ethtypes.NewTransaction(newNonce, address, big.NewInt(0), 1000000, big.NewInt(1000000000), data)
+	tx := ethtypes.NewTransaction(newNonce, address, big.NewInt(0), 1000000, big.NewInt(1000000000000000), data)
 	signedTx, err := ethtypes.SignTx(tx, ethtypes.NewCancunSigner(big.NewInt(1356)), privateKey)
 	assert.Nil(t, err)
 	err = chainClient.SendTransaction(context.Background(), signedTx)
@@ -98,7 +98,7 @@ func TestCacheClient(t *testing.T) {
 	auth.GasLimit = uint64(300000)
 
 	// 设置交易的 gas 价格
-	auth.GasPrice = big.NewInt(10000000000)
+	auth.GasPrice = big.NewInt(10000000000000)
 	abi, err := ParseABI(TestAbi)
 	assert.Nil(t, err)
 
@@ -120,17 +120,30 @@ func TestCacheClient(t *testing.T) {
 
 	newNonce := nonce + 1
 
-	tx := ethtypes.NewTransaction(newNonce, address, big.NewInt(0), 1000000, big.NewInt(1000000000), data)
+	tx := ethtypes.NewTransaction(newNonce, address, big.NewInt(0), 1000000, big.NewInt(100000000000000), data)
 	signedTx, err := ethtypes.SignTx(tx, ethtypes.NewCancunSigner(big.NewInt(1356)), privateKey)
 	assert.Nil(t, err)
 	err = chainClient.SendTransaction(context.Background(), signedTx)
 	assert.Nil(t, err)
 	time.Sleep(3 * time.Second)
 	client.RemoveSubsciption("BlockNum")
+
+	client.GetLogsHistory([]common.Address{address}, [][]common.Hash{{BlockNumHash}}, big.NewInt(0), BlockNumLogsHandler)
+	time.Sleep(10 * time.Second)
 }
 
 func BlockNumHandler(ctx *types.SubClientCtx, brl *types.BlockRangeLogs) (err error) {
 	fmt.Println("BlockNumHandler")
+	fmt.Println(brl.Start)
+	fmt.Println(brl.End)
+	for _, log := range brl.Logs {
+		fmt.Println(log.Data)
+	}
+	return nil
+}
+
+func BlockNumLogsHandler(ctx *types.SubClientCtx, brl *types.BlockRangeLogs) (err error) {
+	fmt.Println("BlockNumLogsHandler")
 	fmt.Println(brl.Start)
 	fmt.Println(brl.End)
 	for _, log := range brl.Logs {
