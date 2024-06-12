@@ -17,6 +17,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+const LostLogsQueryRange = 1999
+
 type Client interface {
 	AddSubscription(tag string, addresses []common.Address, topics [][]common.Hash, isPersisted bool, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error
 	RemoveSubsciption(tag string) error
@@ -128,60 +130,67 @@ func (c *SubClient) ListenAndHandle(headers chan *types.Header, sub ethereum.Sub
 		case header := <-headers:
 			for _, sub := range c.subscriptions {
 				startNum := new(big.Int).Add(sub.Height, big.NewInt(1))
-				if startNum.Cmp(header.Number) <= 0 {
-					logs, err := c.rpcClient.FilterLogs(c.ctx, ethereum.FilterQuery{
-						FromBlock: startNum,
-						ToBlock:   header.Number,
-						Addresses: sub.Addresses,
-						Topics:    sub.Topics,
-					})
-					if err != nil {
-						c.logger.Error(err.Error())
+				endNum := header.Number
+				for startNum.Cmp(endNum) != 1 {
+					nextBlock := new(big.Int).Add(startNum, big.NewInt(LostLogsQueryRange))
+					if nextBlock.Cmp(endNum) == 1 {
+						nextBlock = endNum
 					}
-					if len(logs) == 0 {
-						if c.persistSupport && sub.IsPersisted {
-							subModel, err := subTypes.ToSubscriptionModel(sub)
-							if err != nil {
-								c.logger.Error(err.Error())
-								continue
-							}
-							subModel.Height = header.Number.String()
-							err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
-							if err != nil {
-								c.logger.Error(err.Error())
-								continue
-							}
-						}
-						sub.Height = header.Number
-					} else {
-						blockRangeSub := &subTypes.BlockRangeLogs{
-							ChainId: sub.ChainId,
-							Logs:    logs,
-							Start:   startNum,
-							End:     header.Number,
-						}
-						err = sub.Handler(subTypes.NewSubClientCtx(c.ctx), blockRangeSub)
+					if startNum.Cmp(nextBlock) <= 0 {
+						logs, err := c.rpcClient.FilterLogs(c.ctx, ethereum.FilterQuery{
+							FromBlock: startNum,
+							ToBlock:   nextBlock,
+							Addresses: sub.Addresses,
+							Topics:    sub.Topics,
+						})
 						if err != nil {
 							c.logger.Error(err.Error())
-							continue
 						}
-						if c.persistSupport && sub.IsPersisted {
-							subModel, err := subTypes.ToSubscriptionModel(sub)
+						if len(logs) == 0 {
+							if c.persistSupport && sub.IsPersisted {
+								subModel, err := subTypes.ToSubscriptionModel(sub)
+								if err != nil {
+									c.logger.Error(err.Error())
+									continue
+								}
+								subModel.Height = nextBlock.String()
+								err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
+								if err != nil {
+									c.logger.Error(err.Error())
+									continue
+								}
+							}
+							sub.Height = nextBlock
+						} else {
+							blockRangeSub := &subTypes.BlockRangeLogs{
+								ChainId: sub.ChainId,
+								Logs:    logs,
+								Start:   startNum,
+								End:     nextBlock,
+							}
+							err = sub.Handler(subTypes.NewSubClientCtx(c.ctx), blockRangeSub)
 							if err != nil {
 								c.logger.Error(err.Error())
 								continue
 							}
-							subModel.Height = header.Number.String()
-							err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
-							if err != nil {
-								c.logger.Error(err.Error())
-								continue
+							if c.persistSupport && sub.IsPersisted {
+								subModel, err := subTypes.ToSubscriptionModel(sub)
+								if err != nil {
+									c.logger.Error(err.Error())
+									continue
+								}
+								subModel.Height = nextBlock.String()
+								err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
+								if err != nil {
+									c.logger.Error(err.Error())
+									continue
+								}
 							}
-						}
-						sub.Height = header.Number
+							sub.Height = nextBlock
 
+						}
 					}
-
+					startNum = new(big.Int).Add(nextBlock, big.NewInt(1))
 				}
 
 			}
