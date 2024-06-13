@@ -18,6 +18,7 @@ import (
 
 type Client interface {
 	AddSubscription(tag string, addresses []common.Address, topics [][]common.Hash, isPersisted bool, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error
+	AddSubscriptionFromHeight(tag string, addresses []common.Address, topics [][]common.Hash, isPersisted bool, height *big.Int, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error
 	RemoveSubsciption(tag string) error
 	GetSubscriptionStartAndHeight(tag string) (*big.Int, *big.Int, error)
 	GetSubscriptionTags() []string
@@ -259,6 +260,67 @@ func (c *SubClient) AddSubscription(tag string, addresses []common.Address, topi
 			Tag:         tag,
 			Start:       big.NewInt(int64(currentHeigeht)),
 			Height:      big.NewInt(int64(currentHeigeht)),
+			Addresses:   addresses,
+			Topics:      topics,
+			IsPersisted: isPersisted,
+			Handler:     handler,
+		}
+		subModel, err := subTypes.ToSubscriptionModel(sub)
+		if err != nil {
+			return err
+		}
+		subId, err := c.subscriptionDao.InsertSubscription(c.ctx, subModel)
+		sub.Id = subId
+		c.subscriptions[tag] = sub
+	}
+	return nil
+}
+
+func (c *SubClient) AddSubscriptionFromHeight(tag string, addresses []common.Address, topics [][]common.Hash, isPersisted bool, height *big.Int, handler func(ctx *subTypes.SubClientCtx, brl *subTypes.BlockRangeLogs) (err error)) error {
+	if !c.persistSupport && isPersisted {
+		return errors.New("client not support persist")
+	}
+	if _, ok := c.subscriptions[tag]; ok {
+		return nil
+	}
+
+	if !isPersisted {
+		sub := &subTypes.Subscription{
+			ChainId:     int(c.chainId),
+			Tag:         tag,
+			Start:       height,
+			Height:      height,
+			Addresses:   addresses,
+			Topics:      topics,
+			IsPersisted: isPersisted,
+			Handler:     handler,
+		}
+		c.subscriptions[tag] = sub
+		return nil
+	}
+
+	subTag, err := c.subscriptionDao.QueryByChainIdAndTag(c.ctx, int(c.chainId), tag)
+	if err == nil && subTag != nil && !isPersisted {
+		return errors.New("persisted subscription already exists")
+	}
+
+	if err == nil && subTag != nil {
+		subFromDb, err := subTypes.FromSubscriptionModel(subTag)
+		if err != nil {
+			return err
+		}
+		if !compareAddresses(subFromDb.Addresses, addresses) || !compareTopics(subFromDb.Topics, topics) {
+			return errors.New("err Subscription Data")
+		}
+		subFromDb.Handler = handler
+		subFromDb.IsPersisted = isPersisted
+		c.subscriptions[tag] = subFromDb
+	} else {
+		sub := &subTypes.Subscription{
+			ChainId:     int(c.chainId),
+			Tag:         tag,
+			Start:       height,
+			Height:      height,
 			Addresses:   addresses,
 			Topics:      topics,
 			IsPersisted: isPersisted,
