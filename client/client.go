@@ -146,6 +146,7 @@ func (c *SubClient) ListenAndHandle(headers chan *types.Header, sub ethereum.Sub
 						})
 						if err != nil {
 							c.logger.Error(err.Error())
+							continue
 						}
 						if len(logs) == 0 {
 							if c.persistSupport && sub.IsPersisted {
