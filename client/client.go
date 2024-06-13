@@ -146,20 +146,20 @@ func (c *SubClient) ListenAndHandle(headers chan *types.Header, sub ethereum.Sub
 						})
 						if err != nil {
 							c.logger.Error(err.Error())
-							continue
+							break
 						}
 						if len(logs) == 0 {
 							if c.persistSupport && sub.IsPersisted {
 								subModel, err := subTypes.ToSubscriptionModel(sub)
 								if err != nil {
 									c.logger.Error(err.Error())
-									continue
+									panic(err)
 								}
 								subModel.Height = nextBlock.String()
 								err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
 								if err != nil {
 									c.logger.Error(err.Error())
-									continue
+									panic(err)
 								}
 							}
 							sub.Height = nextBlock
@@ -173,19 +173,19 @@ func (c *SubClient) ListenAndHandle(headers chan *types.Header, sub ethereum.Sub
 							err = sub.Handler(subTypes.NewSubClientCtx(c.ctx), blockRangeSub)
 							if err != nil {
 								c.logger.Error(err.Error())
-								continue
+								break
 							}
 							if c.persistSupport && sub.IsPersisted {
 								subModel, err := subTypes.ToSubscriptionModel(sub)
 								if err != nil {
 									c.logger.Error(err.Error())
-									continue
+									panic(err)
 								}
 								subModel.Height = nextBlock.String()
 								err = c.subscriptionDao.UpdateHeight(c.ctx, subModel)
 								if err != nil {
 									c.logger.Error(err.Error())
-									continue
+									panic(err)
 								}
 							}
 							sub.Height = nextBlock
